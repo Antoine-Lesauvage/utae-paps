@@ -148,8 +148,8 @@ class PaPs(nn.Module):
         center_mask, _ = self.center_extractor(
             heatmap, zones=zones
         )  # (B,H,W) mask of N detected centers
-        center_mask = center_mask.squeeze(0)
-        print(center_mask.shape)
+        #center_mask = center_mask.squeeze() #AL
+        center_mask = center_mask.view(-1, *center_mask.shape[-2:]) # force shape (B, H, W)
 
         if heatmap_only:
             predictions = dict(
@@ -170,6 +170,13 @@ class PaPs(nn.Module):
         # Retrieve info of detected centers
         H, W = heatmap.shape[-2:]
         center_batch, center_h, center_w = torch.where(center_mask)
+        # Filter out centers too close to borders #AL
+        margin = self.shape_size // 2  # ex: 7 si shape_size=14
+        valid = (center_h >= margin) & (center_h < H - margin) & (center_w >= margin) & (center_w < W - margin)
+        center_batch = center_batch[valid]
+        center_h = center_h[valid]
+        center_w = center_w[valid] #AL
+
         center_positions = torch.stack([center_h, center_w], dim=1)
 
         # Construct multi-level feature stack for centers
@@ -216,10 +223,11 @@ class PaPs(nn.Module):
         instance_masks = []
         for i, s in enumerate(shapes.split(1, dim=0)):
             h, w = clamp_size[i]  # Box size
+            #print(f"🔍 h={h}, w={w}, heatmap shape={heatmap.shape}")
             w_start, h_start, w_stop, h_stop = instance_boxes[i]  # Box coordinates
             h_start_valid, w_start_valid = valid_start[i]  # Part of the Box that lies
             h_stop_valid, w_stop_valid = valid_stop[i]  # within the image's extent
-
+            #print( h_start_valid, h_stop_valid, w_start_valid, w_stop_valid)
             ## Resample local shape mask
             pred_mask = (
                 F.interpolate(s, size=(h.item(), w.item()), mode="bilinear")
@@ -231,11 +239,21 @@ class PaPs(nn.Module):
             ## Crop saliency
             crop_saliency = saliency[center_batch[i], :, h_start:h_stop, w_start:w_stop]
 
+            if pred_mask.shape[-2] < 3 or pred_mask.shape[-1] < 3:#AL
+                print(f"⛔️ Skipping pred_mask with shape: {pred_mask.shape}")
+                continue
+
             ## Combine both
+            if crop_saliency.shape[-2] != pred_mask.shape[-2] or crop_saliency.shape[-1] != pred_mask.shape[-1]: #AL
+                print(f"❌ Skip fusion: pred_mask={pred_mask.shape}, crop_saliency={crop_saliency.shape}")
+                continue
+
             if self.mask_cnn is None:
                 pred_mask = torch.sigmoid(pred_mask) * torch.sigmoid(crop_saliency)
             else:
                 pred_mask = pred_mask + crop_saliency
+                #print("🌍 center:", center_h, center_w)
+                #print("📐 pred_mask shape:", pred_mask.shape)
                 pred_mask = torch.sigmoid(pred_mask) * torch.sigmoid(
                     self.mask_cnn(pred_mask.unsqueeze(0)).squeeze(0)
                 )
@@ -265,6 +283,11 @@ class PaPs(nn.Module):
                         new_mask = torch.zeros(
                             center_mask[0].shape, device=center_mask.device
                         )
+                        # Vérifiez si la liste `instance_masks` a l'index requis
+                        if idx >= len(instance_masks):
+                            print(f"Indice idx={idx} dépasse la taille de `instance_masks`")
+                            continue  # Passez si l'index n'est pas valide
+
                         pred_mask_bin = (
                             instance_masks[candidates[idx]].squeeze(0)
                             > self.mask_threshold
@@ -272,7 +295,19 @@ class PaPs(nn.Module):
 
                         if pred_mask_bin.sum() > 0:
                             xtl, ytl, xbr, ybr = instance_boxes[candidates[idx]]
-                            new_mask[ytl:ybr, xtl:xbr] = pred_mask_bin
+                            # Taille du crop cible
+                            target_h = ybr - ytl
+                            target_w = xbr - xtl
+                            source_h, source_w = pred_mask_bin.shape
+
+                            # Tronquer si trop grand
+                            if source_h > target_h or source_w > target_w:
+                                pred_mask_bin = pred_mask_bin[:target_h, :target_w]
+                                # Sécurité finale
+                            if target_h > 0 and target_w > 0 and pred_mask_bin.shape == (target_h, target_w):
+                                new_mask[ytl:ybr, xtl:xbr] = pred_mask_bin
+                            else:
+                                print(f"❌ Skipped: target=({target_h},{target_w}), source={pred_mask_bin.shape}")
 
                             if ((new_mask != 0) * (panoptic_mask != 0)).any():
                                 n_total = (new_mask != 0).sum()
@@ -297,6 +332,7 @@ class PaPs(nn.Module):
         else:
             panoptic_instance = None
             panoptic_semantic = None
+
 
         predictions = dict(
             center_mask=center_mask,
