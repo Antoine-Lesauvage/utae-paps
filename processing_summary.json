@@ -1,0 +1,26 @@
+{
+  "0": {
+    "n_instances": 18,
+    "total_area_ha": 114.62,
+    "avg_confidence": 0.5474669196539454,
+    "classes": [
+      1,
+      3,
+      7,
+      14,
+      15,
+      18
+    ]
+  },
+  "1": {
+    "n_instances": 9,
+    "total_area_ha": 45.76,
+    "avg_confidence": 0.5598263144493103,
+    "classes": [
+      1,
+      3,
+      7,
+      15
+    ]
+  }
+}
