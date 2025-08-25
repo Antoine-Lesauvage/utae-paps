@@ -7,5 +7,5 @@ python setup.py install
 cd ..
 pip install -r requirements.txt
 pip install earthengine-api geemap numpy
-pip install tqdm
+pip install tqdm boto3
 pip install scikit-learn seaborn opencv-python-headless
