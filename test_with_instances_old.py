@@ -19,7 +19,7 @@ from src.panoptic.paps_loss import PaPsLoss
 from src.utils import pad_collate, get_ntrainparams
 
 # === CONFIGURATION ===
-fold = 2
+fold = 3
 with open("../UTAE_PAPs/conf.json") as f:
     config_dict = json.load(f)
 
@@ -52,7 +52,7 @@ dataset = PASTIS_Dataset(
 )
 dataloader = DataLoader(
     dataset,
-    batch_size=2,
+    batch_size=1,
     shuffle=False,
     collate_fn=pad_collate,
     drop_last=True
@@ -99,24 +99,12 @@ class_ids = meter.class_list  # liste des IDs de classes évaluées
 
 # Si tu as les noms de classes, remplace-les ici
 class_names = [
-"Meadow",
-"Soft winter wheat",
-"Corn",
-"Winter barley",
-"Winter rapeseed",
-"Spring barley",
-"Sunflower",
-"Grapevine",
-"Beet",
- "Winter triticale",
- "Winter durum wheat",
- "Fruits,  vegetables, flowers",
- "Potatoes",
- "Leguminous fodder",
- "Soybeans",
- "Orchard",
- "Mixed cereal",
- "Sorghum"]
+    "Background", "Meadow", "Soft winter wheat", "Corn", "Winter barley",
+    "Winter rapeseed", "Spring barley", "Sunflower", "Grapevine", "Beet",
+    "Winter triticale", "Winter durum wheat", "Fruits, vegetables, flowers",
+    "Potatoes", "Leguminous fodder", "Soybeans", "Orchard", "Mixed cereal",
+    "Sorghum", "Void"
+]
 
 
 
