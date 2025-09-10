@@ -149,7 +149,7 @@ class PaPs(nn.Module):
             heatmap, zones=zones
         )  # (B,H,W) mask of N detected centers
         center_mask = center_mask.squeeze(0)
-        print(center_mask.shape)
+        #print(center_mask.shape)
 
         if heatmap_only:
             predictions = dict(
@@ -314,6 +314,23 @@ class PaPs(nn.Module):
 
         return predictions
 
+    def save_for_transfer_learning(self, save_path, epoch, metrics, class_info=None):
+        """Sauvegarde pour transfer learning"""#AL ajout
+        checkpoint = {
+        'model_state_dict': self.state_dict(),
+        'model_config': {
+            'input_dim': self.input_dim,
+            'mlp_dim': self.mlp_dim,
+            'num_classes': self.num_classes,
+            'max_num_groups': self.max_num_groups,
+            'mlp_dropout': self.mlp_dropout
+            },
+            'epoch': epoch,
+            'metrics': metrics,
+            'class_info': class_info
+        }
+        torch.save(checkpoint, save_path)
+        return checkpoint
 
 class CenterExtractor(nn.Module):
     def __init__(self):

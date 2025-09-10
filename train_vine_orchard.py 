@@ -1,0 +1,85 @@
+#!/usr/bin/env python3
+"""
+Script d'entraînement pour la spécialisation vignes/vergers
+Utilise le transfert learning depuis le modèle UTAE+PAPS pré-entraîné
+"""
+import argparse
+import os
+from src.utils import VINE_ORCHARD_CLASS_MAPPING
+
+# Import du script d'entraînement principal
+from train_panoptic import main, parser
+
+def setup_vine_orchard_config():
+    """Configure les paramètres pour l'entraînement vignes/vergers"""
+    
+    # Arguments spécifiques au transfert learning
+    parser.add_argument(
+        "--pretrained_weights", 
+        type=str, 
+        help="Chemin vers les poids pré-entraînés (.pth.tar)"
+    )
+    parser.add_argument(
+        "--pretrained_fold", 
+        default=1, 
+        type=int, 
+        help="Fold à utiliser pour les poids pré-entraînés (1-5)"
+    )
+    parser.add_argument(
+        "--freeze_encoder", 
+        action="store_true", 
+        help="Geler l'encodeur pendant l'entraînement"
+    )
+    parser.add_argument(
+        "--vine_orchard_lr", 
+        default=0.001, 
+        type=float, 
+        help="Learning rate pour le fine-tuning (plus faible que l'entraînement from scratch)"
+    )
+    
+    # Parse arguments
+    config = parser.parse_args()
+    
+    # Configuration spécifique vignes/vergers
+    config.use_vine_orchard_specialization = True
+    config.num_classes = 3
+    config.void_label = 0
+    config.background_label = 0
+    config.out_conv = [32, 3]  # 3 classes au lieu de 20
+    
+    # Learning rate adapté pour le transfert learning
+    if hasattr(config, 'vine_orchard_lr'):
+        config.lr = config.vine_orchard_lr
+    
+    # Chemin vers les poids pré-entraînés
+    if config.pretrained_weights is None and hasattr(config, 'pretrained_fold'):
+        weights_dir = "UTAE_PAPS_w"  # Votre répertoire de poids
+        config.pretrained_weights = os.path.join(
+            weights_dir, 
+            f"Folds_{config.pretrained_fold}", 
+            "model.pth.tar"
+        )
+    
+    print("🍇 CONFIGURATION VIGNES/VERGERS")
+    print("=" * 50)
+    print(f"📁 Poids pré-entraînés : {config.pretrained_weights}")
+    print(f"🎯 Nombre de classes : {config.num_classes}")
+    print(f"📚 Learning rate : {config.lr}")
+    print(f"🔒 Encodeur gelé : {getattr(config, 'freeze_encoder', False)}")
+    print("=" * 50)
+    
+    return config
+
+if __name__ == "__main__":
+    config = setup_vine_orchard_config()
+    
+    # Modifier le dataset pour utiliser le mapping de classes
+    original_main = main
+    
+    def vine_orchard_main(config):
+        # Ajouter le mapping de classes à la config
+        config.class_mapping = VINE_ORCHARD_CLASS_MAPPING
+        return original_main(config)
+    
+    # Lancer l'entraînement
+    vine_orchard_main(config)

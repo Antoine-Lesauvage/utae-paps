@@ -1,4 +1,4 @@
-"""
+""""
 U-TAE Implementation
 Author: Vivien Sainte Fare Garnot (github/VSainteuf)
 License: MIT
@@ -129,42 +129,87 @@ class UTAE(nn.Module):
         self.temporal_aggregator = Temporal_Aggregator(mode=agg_mode)
         self.out_conv = ConvBlock(nkernels=[decoder_widths[0]] + out_conv, padding_mode=padding_mode)
 
-    def forward(self, input, batch_positions=None, return_att=False):
-        pad_mask = (
-            (input == self.pad_value).all(dim=-1).all(dim=-1).all(dim=-1)
-        )  # BxT pad mask
-        out = self.in_conv.smart_forward(input)
-        feature_maps = [out]
-        # SPATIAL ENCODER
-        for i in range(self.n_stages - 1):
-            out = self.down_blocks[i].smart_forward(feature_maps[-1])
-            feature_maps.append(out)
-        # TEMPORAL ENCODER
-        out, att = self.temporal_encoder(
-            feature_maps[-1], batch_positions=batch_positions, pad_mask=pad_mask
-        )
-        # SPATIAL DECODER
-        if self.return_maps:
-            maps = [out]
-        for i in range(self.n_stages - 1):
-            skip = self.temporal_aggregator(
-                feature_maps[-(i + 2)], pad_mask=pad_mask, attn_mask=att
-            )
-            out = self.up_blocks[i](out, skip)
-            if self.return_maps:
-                maps.append(out)
-
-        if self.encoder:
-            return out, maps
+    def forward(self, input, batch_positions=None, return_att=False, return_all=False):
+        """Forward pass avec support des têtes spécialisées"""
+    
+    # Forward normal existant
+        sz = input.shape
+        input = input.view(sz[0] * sz[1], sz[2], sz[3], sz[4])
+        feature_maps = []
+        x = input
+    
+    # Encoder path
+        for i, layer in enumerate(self.encoder):
+            x = layer(x)
+            if i < self.n_layers - 1:
+                feature_maps.append(x)
+    
+    # Temporal aggregation
+        x = x.view(sz[0], sz[1], x.shape[-3], x.shape[-2], x.shape[-1])
+        x, att = self.in_conv(x, batch_positions=batch_positions, return_att=True)
+    
+    # Decoder path
+        for i, (layer, fmap) in enumerate(zip(self.decoder, reversed(feature_maps))):
+            x = layer(x, fmap)
+    
+        x = self.last_conv(x)
+    
+    # Si c'est un modèle spécialisé vignes/vergers
+        if hasattr(self, 'is_vine_orchard_specialized') and self.is_vine_orchard_specialized:
+            return self.forward_vine_orchard(x, return_att, att)
+    
+    # Forward normal
+        if return_att:
+            return x, att
         else:
-            out = self.out_conv(out)
-            if return_att:
-                return out, att
-            if self.return_maps:
-                return out, maps
-            else:
-                return out
+            return x
 
+    def forward_vine_orchard(self, decoder_features, return_att=False, att=None):
+        """Forward pass pour modèle spécialisé vignes/vergers"""
+    
+    # Prédictions spécialisées
+        vine_pred = self.vine_head(decoder_features)
+        orchard_pred = self.orchard_head(decoder_features)
+    
+    # Fusion finale
+        fusion_input = torch.cat([decoder_features, vine_pred, orchard_pred], dim=1)
+        final_pred = self.vine_orchard_fusion(fusion_input)
+    
+        outputs = {
+        'main': final_pred,
+        'vine_specific': vine_pred,
+        'orchard_specific': orchard_pred
+        }
+    
+        if return_att:
+            outputs['attention'] = att
+    
+        return outputs
+
+    def save_for_transfer_learning(self, save_path, epoch, metrics, class_info=None):
+        """Sauvegarde pour transfer learning""" #AL ajout
+        checkpoint = {
+            'model_state_dict': self.state_dict(),
+            'model_config': {
+            'input_dim': self.input_dim,
+            'encoder_widths': self.encoder_widths,
+            'decoder_widths': self.decoder_widths,
+            'out_conv': self.out_conv,
+            'str_conv_k': self.str_conv_k,
+            'str_conv_s': self.str_conv_s,
+            'str_conv_p': self.str_conv_p,
+            'agg_mode': self.agg_mode,
+            'encoder_norm': self.encoder_norm,
+            'n_head': self.n_head,
+            'd_model': self.d_model,
+            'd_k': self.d_k
+            },
+            'epoch': epoch,
+            'metrics': metrics,
+            'class_info': class_info
+        }
+        torch.save(checkpoint, save_path)
+        return checkpoint 
 
 class TemporallySharedBlock(nn.Module):
     """
