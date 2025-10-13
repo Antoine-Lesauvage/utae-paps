@@ -148,8 +148,10 @@ class PaPs(nn.Module):
         center_mask, _ = self.center_extractor(
             heatmap, zones=zones
         )  # (B,H,W) mask of N detected centers
-        center_mask = center_mask.squeeze(0)
-        #print(center_mask.shape)
+        if center_mask.dim() == 4:  # (B, 1, H, W)
+            center_mask = center_mask.squeeze(1)  # -> (B, H, W)
+        elif center_mask.dim() == 2:  # (H, W)
+            center_mask = center_mask.unsqueeze(0)  # -> (1, H, W)
 
         if heatmap_only:
             predictions = dict(

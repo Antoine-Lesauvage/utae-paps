@@ -111,7 +111,7 @@ def main(config):
             map_location=device,
         )
         model.load_state_dict(sd["state_dict"])
-
+        
         criterion = PaPsLoss(
             l_center=config.l_center,
             l_size=config.l_size,

@@ -11,7 +11,7 @@ import time
 
 import numpy as np
 import torch
-import torch.utils.data as data
+import torch.utils.data as data_t
 import torchnet as tnt
 
 from src import model_utils
@@ -20,6 +20,7 @@ from src.learning.weight_init import weight_init
 from src.panoptic.metrics import PanopticMeter
 from src.panoptic.paps_loss import PaPsLoss
 from src.utils import pad_collate, get_ntrainparams
+from src.utils import create_weighted_sampler
 
 parser = argparse.ArgumentParser()
 # PaPs Parameters
@@ -384,43 +385,82 @@ def main(config):
             mono_date=config.mono_date,
             target="instance",
         )
+        if hasattr(config, 'class_mapping') and config.class_mapping is not None:
+            dt_args['class_mapping'] = config.class_mapping
+            print(f"✅ Class mapping ajouté aux arguments du dataset: {config.class_mapping}")
+        else:
+            print("⚠️ Aucun class mapping trouvé dans la config")
+            print(f"📊 Arguments du dataset: {list(dt_args.keys())}")
         dt_train = PASTIS_Dataset(**dt_args, cache=config.cache, folds=train_folds)
         dt_val = PASTIS_Dataset(**dt_args, folds=val_fold)
         dt_test = PASTIS_Dataset(**dt_args, folds=test_fold)
+        print("🔍 VÉRIFICATION DU MAPPING DE CLASSES")
+        print(f"Dataset train - class_mapping actif: {dt_train.class_mapping is not None}")
+        if dt_train.class_mapping is not None:
+            print("✅ Mapping appliqué dans le dataset")
+            # Test sur un échantillon
+            sample = dt_train[0]
+            (data, dates), target = sample
+            unique_classes = torch.unique(target[:, :, 6].long())  # Semantic labels
+            print(f"Classes uniques trouvées: {unique_classes}")
+            print(f"Min: {torch.min(unique_classes)}, Max: {torch.max(unique_classes)}")
+        else:
+            print("❌ Mapping PAS appliqué dans le dataset")
+        # Après la création des datasets dt_train, dt_val, dt_test
+        print("⚖️  CRÉATION DES SAMPLERS ÉQUILIBRÉS")
 
-        train_loader = data.DataLoader(
-            dt_train,
-            batch_size=config.batch_size,
-            shuffle=True,
-            drop_last=True,
-            collate_fn=pad_collate,
+# Analyser et créer le sampler pour l'entraînement
+        train_sampler = create_weighted_sampler(dt_train)
+
+# Pas de sampler pour validation/test (on veut la distribution naturelle)
+        train_loader = data_t.DataLoader(
+    dt_train,
+    batch_size=config.batch_size,
+    sampler=train_sampler,  # ← Utiliser le sampler au lieu de shuffle
+    drop_last=True,
+    collate_fn=pad_collate,
+    num_workers=config.num_workers,
         )
-        val_loader = data.DataLoader(
-            dt_val,
-            batch_size=config.batch_size,
-            shuffle=True,
-            drop_last=True,
-            collate_fn=pad_collate,
-            num_workers=config.num_workers,
+
+# Validation et test restent identiques
+        val_loader = data_t.DataLoader(
+    dt_val,
+    batch_size=config.batch_size,
+    shuffle=False,  # Pas de shuffle pour validation
+    drop_last=True,
+    collate_fn=pad_collate,
+    num_workers=config.num_workers,
         )
-        test_loader = data.DataLoader(
-            dt_test,
-            batch_size=config.batch_size,
-            shuffle=True,
-            drop_last=True,
-            collate_fn=pad_collate,
-            num_workers=config.num_workers,
+
+        test_loader = data_t.DataLoader(
+    dt_test,
+    batch_size=config.batch_size,
+    shuffle=False,  # Pas de shuffle pour test
+    drop_last=True,
+    collate_fn=pad_collate,
+    num_workers=config.num_workers,
         )
 
         print(
             "Train {}, Val {}, Test {}".format(len(dt_train), len(dt_val), len(dt_test))
         )
 
-        model = model_utils.get_model(config, mode="panoptic")
+        #model = model_utils.get_model(config, mode="panoptic")
+        if getattr(config, 'use_vine_orchard_specialization', False):
+            print("🍇 Utilisation du modèle spécialisé vignes/vergers")
+            model = model_utils.get_vine_orchard_model(config)
+        else:
+            print("📊 Utilisation du modèle standard")
+            model = model_utils.get_model(config, mode="panoptic")
 
         config.N_params = get_ntrainparams(model)
-        with open(os.path.join(config.res_dir, "conf.json"), "w") as file:
+        #with open(os.path.join(config.res_dir, "conf.json"), "w") as file:
+            #file.write(json.dumps(vars(config), indent=4))
+        fold_config_path = os.path.join(config.res_dir, f"Fold_{fold + 1}", "config.json")
+        os.makedirs(os.path.dirname(fold_config_path), exist_ok=True)
+        with open(fold_config_path, "w") as file:
             file.write(json.dumps(vars(config), indent=4))
+        print(f"💾 Configuration sauvegardée : {fold_config_path}")
         print(model)
         print("TOTAL TRAINABLE PARAMETERS :", config.N_params)
         print("Trainable layers:")
@@ -430,13 +470,55 @@ def main(config):
 
         model = model.to(device)
         optimizer = torch.optim.Adam(model.parameters(), lr=config.lr)
-        scheduler = torch.optim.lr_scheduler.MultiStepLR(
-            optimizer=optimizer, milestones=[60, 80], gamma=0.3
+        #scheduler = torch.optim.lr_scheduler.MultiStepLR( #AL
+        #    optimizer=optimizer, milestones=[60, 80], gamma=0.3
+        #)
+        # Par un scheduler plus adapté au transfert learning :
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(
+            optimizer, T_0=10, T_mult=2, eta_min=1e-6
         )
-
         model.apply(weight_init)
-        trainlog = {}
+        # GESTION DE LA REPRISE D'ENTRAÎNEMENT
         start_epoch = 0
+        trainlog = {}
+        best_pq = -1.0
+
+        # Vérifier s'il faut reprendre depuis un checkpoint
+        if hasattr(config, 'resume_checkpoint') and config.resume_checkpoint:
+            print(f"🔄 Reprise d'entraînement depuis : {config.resume_checkpoint}")
+    
+            try:
+                # Charger le checkpoint
+                resume_data = torch.load(config.resume_checkpoint, map_location=device)
+        
+                # Restaurer l'état du modèle et de l'optimiseur
+                model.load_state_dict(resume_data['state_dict'])
+                if 'optimizer' in resume_data:
+                    optimizer.load_state_dict(resume_data['optimizer'])
+        
+                start_epoch = resume_data.get('epoch', 0)
+        
+                # Charger le log d'entraînement existant
+                log_path = os.path.join(config.res_dir, f"Fold_{fold + 1}", "trainlog.json")
+                if os.path.exists(log_path):
+                    with open(log_path, 'r') as f:
+                        trainlog = json.load(f)
+            
+                    # Trouver le meilleur PQ précédent
+                    for epoch_log in trainlog.values():
+                        if 'val_PQ' in epoch_log:
+                            best_pq = max(best_pq, epoch_log['val_PQ'])
+        
+                print(f"✅ Reprise réussie depuis l'époque {start_epoch}")
+                print(f"📊 Meilleur PQ précédent : {best_pq:.4f}")
+        
+            except Exception as e:
+                print(f"❌ Erreur lors de la reprise : {e}")
+                print("🔄 Démarrage d'un nouvel entraînement")
+                start_epoch = 0
+                trainlog = {}
+                best_pq = -1.0
+                
 
         criterion = PaPsLoss(
             l_center=config.l_center,
@@ -449,7 +531,18 @@ def main(config):
 
         best_pq = -1.0
         for epoch in range(start_epoch + 1, start_epoch + config.epochs + 1):
-            print("EPOCH {}/{}".format(epoch, config.epochs))
+            print("EPOCH {}/{}".format(epoch, start_epoch + config.epochs))
+            if epoch % 5 == 0 or epoch == config.epochs:  # Sauvegarder tous les 5 époques
+                torch.save(
+            {
+            "epoch": epoch,
+            "state_dict": model.state_dict(),
+            "optimizer": optimizer.state_dict(),
+                },
+                os.path.join(
+                config.res_dir, "Fold_{}".format(fold + 1), f"model_epoch_{epoch}.pth.tar"
+                ),
+                    )
             heatmap_only = epoch - 1 < config.warmup if config.warmup > 0 else False
             model.train()
             train_metrics = iterate(

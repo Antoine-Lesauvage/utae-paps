@@ -4,11 +4,12 @@ Script d'entraînement pour la spécialisation vignes/vergers
 Utilise le transfert learning depuis le modèle UTAE+PAPS pré-entraîné
 """
 import argparse
+import json
 import os
-from src.utils import VINE_ORCHARD_CLASS_MAPPING
+import pprint
 
 # Import du script d'entraînement principal
-from train_panoptic import main, parser
+from train_panoptic import main, parser, list_args
 
 def setup_vine_orchard_config():
     """Configure les paramètres pour l'entraînement vignes/vergers"""
@@ -34,31 +35,49 @@ def setup_vine_orchard_config():
         "--vine_orchard_lr", 
         default=0.001, 
         type=float, 
-        help="Learning rate pour le fine-tuning (plus faible que l'entraînement from scratch)"
+        help="Learning rate pour le fine-tuning"
     )
     
     # Parse arguments
     config = parser.parse_args()
     
+    # Parser les listes comme dans le script original
+    for k, v in vars(config).items():
+        if k in list_args and v is not None:
+            if isinstance(v, str):
+                v = v.replace("[", "")
+                v = v.replace("]", "")
+                config.__setattr__(k, list(map(int, v.split(","))))
+    
     # Configuration spécifique vignes/vergers
     config.use_vine_orchard_specialization = True
-    config.num_classes = 3
-    config.void_label = 0
+    config.num_classes = 4
     config.background_label = 0
-    config.out_conv = [32, 3]  # 3 classes au lieu de 20
+    config.void_label = 3  # Le label vide
+    config.out_conv = [32, 4]
+
     
     # Learning rate adapté pour le transfert learning
     if hasattr(config, 'vine_orchard_lr'):
         config.lr = config.vine_orchard_lr
     
     # Chemin vers les poids pré-entraînés
-    if config.pretrained_weights is None and hasattr(config, 'pretrained_fold'):
-        weights_dir = "UTAE_PAPS_w"  # Votre répertoire de poids
+    if config.pretrained_weights is None:
+        weights_dir = "/home/onyxia/work/UTAE_PAPs"
         config.pretrained_weights = os.path.join(
             weights_dir, 
-            f"Folds_{config.pretrained_fold}", 
+            f"Fold_{config.pretrained_fold}", 
             "model.pth.tar"
         )
+    
+    # Ajouter le mapping de classes
+    from src.utils import VINE_ORCHARD_CLASS_MAPPING
+    config.class_mapping = VINE_ORCHARD_CLASS_MAPPING
+
+# Ajouter une vérification :
+    print(f"🎯 Mapping ajouté à la config: {config.class_mapping}")
+    
+    print(f"🔢 Type du mapping: {type(config.class_mapping)}")
     
     print("🍇 CONFIGURATION VIGNES/VERGERS")
     print("=" * 50)
@@ -66,20 +85,12 @@ def setup_vine_orchard_config():
     print(f"🎯 Nombre de classes : {config.num_classes}")
     print(f"📚 Learning rate : {config.lr}")
     print(f"🔒 Encodeur gelé : {getattr(config, 'freeze_encoder', False)}")
+    print(f"📊 Mapping de classes actif")
     print("=" * 50)
     
     return config
 
 if __name__ == "__main__":
     config = setup_vine_orchard_config()
-    
-    # Modifier le dataset pour utiliser le mapping de classes
-    original_main = main
-    
-    def vine_orchard_main(config):
-        # Ajouter le mapping de classes à la config
-        config.class_mapping = VINE_ORCHARD_CLASS_MAPPING
-        return original_main(config)
-    
-    # Lancer l'entraînement
-    vine_orchard_main(config)
+    pprint.pprint(vars(config))
+    main(config)

@@ -9,3 +9,5 @@ pip install -r requirements.txt
 pip install earthengine-api geemap numpy
 pip install tqdm boto3
 pip install scikit-learn seaborn opencv-python-headless
+pip install torch
+pip install torchnet torch_scatter geopandas

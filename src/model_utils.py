@@ -147,7 +147,6 @@ def get_vine_orchard_model(config):
     Crée un modèle UTAE+PAPS spécialisé pour vignes/vergers (3 classes)
     """
     from src.utils import adapt_model_for_vine_orchard
-    from src.utils import adapt_model_for_vine_orchard, freeze_encoder_layers
     
     # Créer le modèle avec la nouvelle configuration
     if config.backbone == "utae":
@@ -156,7 +155,7 @@ def get_vine_orchard_model(config):
             input_dim=config.input_dim if hasattr(config, 'input_dim') else 10,
             encoder_widths=config.encoder_widths,
             decoder_widths=config.decoder_widths,
-            out_conv=[32, 3],  # ← 3 classes au lieu de 20
+            out_conv=[32, 32],  # ← GARDER 32 canaux pour PaPs, pas 3 !
             str_conv_k=config.str_conv_k,
             str_conv_s=config.str_conv_s,
             str_conv_p=config.str_conv_p,
@@ -167,12 +166,14 @@ def get_vine_orchard_model(config):
             d_k=config.d_k,
             pad_value=config.pad_value,
             padding_mode=config.padding_mode,
+            encoder=False,  # ← Mode standard
+            return_maps=True,  # ← Retourner les feature maps
         )
     
     from src.panoptic.paps import PaPs
     model = PaPs(
         encoder=encoder,
-        num_classes=3,  # ← 3 classes au lieu de 20
+        num_classes=4,  # ← C'est ICI qu'on spécifie 3 classes, pas dans l'encodeur
         shape_size=config.shape_size,
         mask_conv=config.mask_conv,
         min_confidence=config.min_confidence,
@@ -184,7 +185,5 @@ def get_vine_orchard_model(config):
     pretrained_path = getattr(config, 'pretrained_weights', None)
     if pretrained_path:
         model = adapt_model_for_vine_orchard(model, pretrained_path)
-    # Geler l'encodeur si demandé
-    if getattr(config, 'freeze_encoder', False):
-        model = freeze_encoder_layers(model, freeze=True)    
+    
     return model
