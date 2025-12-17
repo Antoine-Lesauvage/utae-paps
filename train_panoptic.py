@@ -19,9 +19,10 @@ from src.dataset import PASTIS_Dataset
 from src.learning.weight_init import weight_init
 from src.panoptic.metrics import PanopticMeter
 from src.panoptic.paps_loss import PaPsLoss
+from src.panoptic.FocalLoss import FocalLoss
 from src.utils import pad_collate, get_ntrainparams
 from src.utils import create_weighted_sampler
-
+from src.temporal_augmentation import PASTIS_Dataset_WithAugmentation, create_vine_orchard_augmentation
 parser = argparse.ArgumentParser()
 # PaPs Parameters
 ## Architecture Hyperparameters
@@ -160,6 +161,25 @@ parser.add_argument(
 parser.add_argument(
     "--num_workers", default=4, type=int, help="Number of data loading workers"
 )
+parser.add_argument(
+    "--use_focal_loss",
+    dest="use_focal_loss",
+    action="store_true",
+    help="Use Focal Loss instead of standard PaPs loss"
+)
+parser.add_argument(
+    "--focal_gamma", 
+    default=2.0, 
+    type=float, 
+    help="Gamma parameter for Focal Loss (focus on hard examples)"
+)
+parser.add_argument(
+    "--focal_alpha", 
+    default="0.1, 3.0, 15.0, 0.8",  # Sera calculé automatiquement
+    type=str, 
+    help="Alpha parameter for Focal Loss (class weighting)"
+)
+
 parser.add_argument("--rdm_seed", default=1, type=int, help="Random seed")
 parser.add_argument(
     "--device",
@@ -179,12 +199,45 @@ parser.add_argument(
     action="store_true",
     help="If specified, the whole dataset is kept in RAM",
 )
-
+parser.add_argument(
+    "--temporal_aug",
+    dest="temporal_aug",
+    action="store_true",
+    help="Enable temporal augmentations"
+)
+parser.add_argument(
+    "--aug_factor", 
+    default=2, 
+    type=int, 
+    help="Temporal augmentation factor"
+)
 list_args = ["encoder_widths", "decoder_widths", "out_conv"]
 
 parser.set_defaults(
     cache=False, mask_conv=True, supmax=True, autotune=True, val_metrics_only=False
 )
+
+def parse_focal_alpha(alpha_str, num_classes=4):
+    """
+    Parse alpha weights from comma-separated string
+    """
+    if alpha_str is None:
+        return None
+    
+    try:
+        # Parser les valeurs séparées par des virgules
+        alpha_values = [float(x.strip()) for x in alpha_str.split(',')]
+        
+        if len(alpha_values) != num_classes:
+            raise ValueError(f"Expected {num_classes} alpha values, got {len(alpha_values)}")
+        
+        print(f"✅ Poids Alpha parsés: {alpha_values}")
+        return torch.tensor(alpha_values, dtype=torch.float32)
+    
+    except Exception as e:
+        print(f"❌ Erreur parsing alpha weights: {e}")
+        print(f"Format attendu: 'val1,val2,val3,val4' (exemple: '1.16,29.78,250.42,10.11')")
+        return None
 
 
 def iterate(
@@ -378,6 +431,7 @@ def main(config):
     for fold, (train_folds, val_fold, test_fold) in enumerate(fold_sequence):
         if config.fold is not None:
             fold = config.fold - 1  # Quick fix to launch different folds simultaneously
+                # Configuration des arguments du dataset
         dt_args = dict(
             folder=config.dataset_folder,
             norm=True,
@@ -388,57 +442,77 @@ def main(config):
         if hasattr(config, 'class_mapping') and config.class_mapping is not None:
             dt_args['class_mapping'] = config.class_mapping
             print(f"✅ Class mapping ajouté aux arguments du dataset: {config.class_mapping}")
-        else:
-            print("⚠️ Aucun class mapping trouvé dans la config")
-            print(f"📊 Arguments du dataset: {list(dt_args.keys())}")
-        dt_train = PASTIS_Dataset(**dt_args, cache=config.cache, folds=train_folds)
+        
+        # 🚀 DATASET D'ENTRAÎNEMENT AVEC AUGMENTATIONS TEMPORELLES
+        print("🔄 Création du dataset d'entraînement avec augmentations temporelles...")
+        temporal_aug_pipeline = create_vine_orchard_augmentation()
+        
+        dt_train = PASTIS_Dataset_WithAugmentation(
+            **dt_args, 
+            cache=config.cache, 
+            folds=train_folds,
+            temporal_aug_pipeline=temporal_aug_pipeline,
+            augmentation_factors={
+                0: 1,    # Background: pas d'augmentation
+                1: 6,    # Vigne: x6 (compenser rareté)
+                2: 12,   # Verger: x12 (compenser extrême rareté)
+                3: 3     # Vide: x3
+            },
+            target_classes=[1, 2, 3],  # Classes à favoriser
+        )
+        
+        # 📊 DATASETS DE VALIDATION/TEST SANS AUGMENTATIONS
         dt_val = PASTIS_Dataset(**dt_args, folds=val_fold)
         dt_test = PASTIS_Dataset(**dt_args, folds=test_fold)
-        print("🔍 VÉRIFICATION DU MAPPING DE CLASSES")
-        print(f"Dataset train - class_mapping actif: {dt_train.class_mapping is not None}")
-        if dt_train.class_mapping is not None:
-            print("✅ Mapping appliqué dans le dataset")
-            # Test sur un échantillon
-            sample = dt_train[0]
-            (data, dates), target = sample
-            unique_classes = torch.unique(target[:, :, 6].long())  # Semantic labels
-            print(f"Classes uniques trouvées: {unique_classes}")
-            print(f"Min: {torch.min(unique_classes)}, Max: {torch.max(unique_classes)}")
-        else:
-            print("❌ Mapping PAS appliqué dans le dataset")
-        # Après la création des datasets dt_train, dt_val, dt_test
-        print("⚖️  CRÉATION DES SAMPLERS ÉQUILIBRÉS")
-
-# Analyser et créer le sampler pour l'entraînement
-        train_sampler = create_weighted_sampler(dt_train)
-
-# Pas de sampler pour validation/test (on veut la distribution naturelle)
+        
+        # Vérification de la configuration
+        print("🔍 VÉRIFICATION DU DATASET")
+        print(f"Dataset train - classe: {type(dt_train).__name__}")
+        print(f"Dataset val - classe: {type(dt_val).__name__}")
+        print(f"Dataset test - classe: {type(dt_test).__name__}")
+        print(f"Train: {len(dt_train)} échantillons (avec augmentations)")
+        print(f"Val: {len(dt_val)} échantillons")
+        print(f"Test: {len(dt_test)} échantillons")
+        
+        # 🎯 CRÉATION DU SAMPLER ÉQUILIBRÉ
+        print("⚖️ Création du sampler équilibré pour l'entraînement...")
+        train_sampler = create_weighted_sampler(
+            dt_train,
+                class_weights={
+        0: 0.2,   # Réduire Background
+        1: 0.4,   # Augmenter Vigne
+        2: 0.35,  # Augmenter Verger (classe la plus rare)  
+        3: 0.05   # Vide reste minoritaire
+    }
+        )
+        
+        # 🔄 DATALOADERS
         train_loader = data_t.DataLoader(
-    dt_train,
-    batch_size=config.batch_size,
-    sampler=train_sampler,  # ← Utiliser le sampler au lieu de shuffle
-    drop_last=True,
-    collate_fn=pad_collate,
-    num_workers=config.num_workers,
+            dt_train,
+            batch_size=config.batch_size,
+            sampler=train_sampler,  # ← Utiliser le sampler au lieu de shuffle
+            drop_last=True,
+            collate_fn=pad_collate,
+            num_workers=config.num_workers,
         )
-
-# Validation et test restent identiques
+        
+        # Validation et test sans sampler (distribution naturelle)
         val_loader = data_t.DataLoader(
-    dt_val,
-    batch_size=config.batch_size,
-    shuffle=False,  # Pas de shuffle pour validation
-    drop_last=True,
-    collate_fn=pad_collate,
-    num_workers=config.num_workers,
+            dt_val,
+            batch_size=config.batch_size,
+            shuffle=False,
+            drop_last=True,
+            collate_fn=pad_collate,
+            num_workers=config.num_workers,
         )
-
+        
         test_loader = data_t.DataLoader(
-    dt_test,
-    batch_size=config.batch_size,
-    shuffle=False,  # Pas de shuffle pour test
-    drop_last=True,
-    collate_fn=pad_collate,
-    num_workers=config.num_workers,
+            dt_test,
+            batch_size=config.batch_size,
+            shuffle=False,
+            drop_last=True,
+            collate_fn=pad_collate,
+            num_workers=config.num_workers,
         )
 
         print(
@@ -520,14 +594,122 @@ def main(config):
                 best_pq = -1.0
                 
 
-        criterion = PaPsLoss(
-            l_center=config.l_center,
-            l_size=config.l_size,
-            l_shape=config.l_shape,
-            l_class=config.l_class,
-            beta=config.beta,
-            void_label=config.void_label,
-        )
+        # Dans la fonction main(), remplacer la section criterion par :
+        if getattr(config, 'use_focal_loss', False):
+            print("🎯 Initialisation de Focal Loss pour classes déséquilibrées")
+            alpha_weights = parse_focal_alpha(config.focal_alpha, num_classes=4)
+            # Créer une loss combinée : Focal Loss + PaPs Loss
+            focal_criterion = FocalLoss(
+        alpha=alpha_weights,
+        gamma=config.focal_gamma,
+        ignore_label=config.void_label
+            )
+    
+            # Loss hybride pour la segmentation panoptique
+            class HybridPanopticLoss(torch.nn.Module):
+                def __init__(self, focal_loss, paps_loss, focal_weight=0.5):
+                    super().__init__()
+                    self.focal_loss = focal_loss
+                    self.paps_loss = paps_loss
+                    self.focal_weight = focal_weight
+                    self.value = [0.0, 0.0, 0.0, 0.0]  # [center, size, shape, class]
+        
+                def forward(self, predictions, targets, heatmap_only=False):
+        # Loss PaPs standard
+                    paps_loss_value = self.paps_loss(predictions, targets, heatmap_only)
+        
+        # Toujours synchroniser les attributs PaPs
+                    self.value = self.paps_loss.value
+                    if hasattr(self.paps_loss, 'predicted_confidences'):
+                        self.predicted_confidences = self.paps_loss.predicted_confidences
+                    if hasattr(self.paps_loss, 'achieved_ious'):
+                        self.achieved_ious = self.paps_loss.achieved_ious
+        
+                    if not heatmap_only and "semantic" in predictions:
+                        try:
+                            semantic_pred = predictions["semantic"]
+                            device = semantic_pred.device
+                
+                            if semantic_pred.dim() == 2:
+                    # Cas prédictions déjà flattened
+                                semantic_pred_flat = semantic_pred
+                    
+                    # Extraire targets sémantiques
+                                if targets.dim() == 4:
+                                    semantic_targets = targets[:, :, :, 6].long()
+                                else:
+                                    semantic_targets = targets.long()
+                    
+                    # Flatten les targets
+                                semantic_targets_flat = semantic_targets.view(-1)
+                    
+                    # Ajuster la taille si nécessaire
+                                if semantic_pred_flat.shape[0] != semantic_targets_flat.shape[0]:
+                                    N = semantic_pred_flat.shape[0]
+                                    semantic_targets_flat = semantic_targets_flat[:N]
+                    
+                    # S'assurer que tout est sur le même device
+                                semantic_targets_flat = semantic_targets_flat.to(device)
+                    
+                    # S'assurer que alpha est sur le bon device
+                                if hasattr(self.focal_loss, 'alpha') and self.focal_loss.alpha is not None:
+                                    self.focal_loss.alpha = self.focal_loss.alpha.to(device)
+                    
+                    # Vérifications de sécurité
+                                max_class = semantic_targets_flat.max().item()
+                                if max_class >= semantic_pred_flat.shape[1]:
+                                    return paps_loss_value
+                    
+                    # Appliquer Focal Loss
+                                focal_loss_value = self.focal_loss(semantic_pred_flat, semantic_targets_flat)
+                    
+                    # Combiner les losses
+                                total_loss = (1 - self.focal_weight) * paps_loss_value + self.focal_weight * focal_loss_value
+                    
+                    # Mettre à jour les métriques (optionnel)
+                                paps_values = list(self.paps_loss.value)
+                                if len(paps_values) >= 4:
+                                    paps_values[3] = focal_loss_value.item()  # Remplacer class loss
+                                    self.value = paps_values
+                    
+                                #print(f"📊 PaPs: {paps_loss_value.item():.4f}, Focal: {focal_loss_value.item():.4f}, Total: {total_loss.item():.4f}")
+                    
+                                return total_loss
+                            else:
+                                return paps_loss_value
+                    
+                        except Exception as e:
+                            print(f"⚠️ Focal Loss failed, using PaPs only: {e}")
+                            return paps_loss_value
+        
+                    return paps_loss_value
+    
+    # Créer la loss PaPs standard
+            paps_criterion = PaPsLoss(
+        l_center=config.l_center,
+        l_size=config.l_size,
+        l_shape=config.l_shape,
+        l_class=config.l_class,
+        beta=config.beta,
+        void_label=config.void_label,
+            )
+    
+    # Combiner les deux
+            criterion = HybridPanopticLoss(focal_criterion, paps_criterion, focal_weight=1.0)
+    
+            print(f"✅ Loss hybride configurée : gamma={config.focal_gamma}, poids focal={1.0}")
+    
+        else:
+    # Loss PaPs standard
+            criterion = PaPsLoss(
+        l_center=config.l_center,
+        l_size=config.l_size,
+        l_shape=config.l_shape,
+        l_class=config.l_class,
+        beta=config.beta,
+        void_label=config.void_label,
+            )
+            print("📊 Utilisation de la loss PaPs standard")
 
         best_pq = -1.0
         for epoch in range(start_epoch + 1, start_epoch + config.epochs + 1):
@@ -625,3 +807,4 @@ if __name__ == "__main__":
 
     pprint.pprint(config)
     main(config)
+    

@@ -1,7 +1,8 @@
 #pip install -U pip setuptools wheel
 #pip install torchvision 
-pip install torch_scatter -f https://data.pyg.org/whl/torch-2.1.0+cu121.html
-git clone https://github.com/rusty1s/pytorch_scatter.git
+#pip install torch_scatter -f https://data.pyg.org/whl/torch-2.1.0+cu121.html
+#git clone https://github.com/rusty1s/pytorch_scatter.git
+pip install torch
 cd pytorch_scatter
 python setup.py install
 cd ..

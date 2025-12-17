@@ -5,48 +5,80 @@ Credits : https://github.com/clcarwin
 
 Only modified to add the option to ignore a label
 """
-
+"""
+FocalLoss compatible avec PaPsLoss
+"""
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.autograd import Variable
-
 
 class FocalLoss(nn.Module):
-    def __init__(self, gamma=0, alpha=None, size_average=True, ignore_label=None):
+    def __init__(self, alpha=None, gamma=2.0, ignore_label=None):
         super(FocalLoss, self).__init__()
+        
+        if alpha is not None:
+            if isinstance(alpha, (list, tuple)):
+                self.alpha = torch.tensor(alpha, dtype=torch.float32)
+            else:
+                self.alpha = alpha
+        else:
+            self.alpha = None
+            
         self.gamma = gamma
-        self.alpha = alpha
-        if isinstance(alpha, (float, int)): self.alpha = torch.Tensor([alpha, 1 - alpha])
-        if isinstance(alpha, list): self.alpha = torch.Tensor(alpha)
-        self.size_average = size_average
-        self.ignore_label = ignore_label
-
-    def forward(self, input, target):
-        if input.dim() > 2:
-            input = input.view(input.size(0), input.size(1), -1)  # N,C,H,W => N,C,H*W
-            input = input.transpose(1, 2)  # N,C,H*W => N,H*W,C
-            input = input.contiguous().view(-1, input.size(2))  # N,H*W,C => N*H*W,C
-        target = target.view(-1, 1)
-        if input.squeeze(1).dim() == 1:
-            logpt = torch.sigmoid(input)
-            logpt = logpt.view(-1)
-        else:
-            logpt = F.log_softmax(input, dim=-1)
-            logpt = logpt.gather(1, target)
-            logpt = logpt.view(-1)
-        pt = Variable(logpt.data.exp())
-
+        self.ignore_label = ignore_label if ignore_label is not None else -100
+    
+    def forward(self, inputs, targets):
+        """
+        Args:
+            inputs: (N, C) - logits
+            targets: (N,) - ground truth classes
+        """
+            # Ajouter ces lignes de debug pour comprendre le problème
+        #print(f"DEBUG - Inputs shape: {inputs.shape}")
+        #print(f"DEBUG - Targets shape: {targets.shape}")
+        #print(f"DEBUG - Targets dtype: {targets.dtype}")
+        #print(f"DEBUG - Targets unique values: {torch.unique(targets)}")
+    
+    # Corriger le format des targets si nécessaire
+        if targets.dim() > 1:
+            targets = targets.squeeze()  # Supprimer les dimensions unitaires
+        
+    # Si targets est encore multi-dimensionnel, le flattener
+        if targets.dim() > 1:
+            targets = targets.view(-1)
+            inputs = inputs.view(inputs.size(0), -1)  # Adapter inputs aussi
+    
+        ce_loss = F.cross_entropy(
+            inputs, targets,
+            reduction='none',
+            ignore_index=self.ignore_label
+        )
+        
+        # Calculer les probabilités pt
+        pt = torch.exp(-ce_loss)
+        
+        # Terme de focusing (1-pt)^gamma
+        focal_weight = (1 - pt) ** self.gamma
+        focal_loss = focal_weight * ce_loss
+        
+        # Appliquer les poids alpha si fournis
         if self.alpha is not None:
-            if self.alpha.type() != input.data.type():
-                self.alpha = self.alpha.type_as(input.data)
-            at = self.alpha.gather(0, target.data.view(-1))
-            logpt = logpt * Variable(at)
-
-        loss = -1 * (1 - pt) ** self.gamma * logpt
-        if self.ignore_label is not None:
-            loss = loss[target[:,0] != self.ignore_label]
-        if self.size_average:
-            return loss.mean()
+            # Masque pour targets valides
+            valid_mask = (targets != self.ignore_label)
+            
+            if valid_mask.any():
+                # Extraire alpha pour chaque target selon sa classe
+                alpha_t = self.alpha[targets[valid_mask]]
+                
+                # Appliquer alpha seulement aux éléments valides
+                focal_loss_weighted = torch.zeros_like(focal_loss)
+                focal_loss_weighted[valid_mask] = alpha_t * focal_loss[valid_mask]
+                focal_loss_weighted[~valid_mask] = focal_loss[~valid_mask]
+                focal_loss = focal_loss_weighted
+        
+        # Réduction finale
+        valid_elements = (targets != self.ignore_label).sum()
+        if valid_elements > 0:
+            return focal_loss.sum() / valid_elements
         else:
-            return loss.sum()
+            return focal_loss.sum()

@@ -1,0 +1,11 @@
+{
+    "test_loss": 2.478606024408727,
+    "test_center_loss": 257.11854751710973,
+    "test_size_loss": 1.9138459374264971,
+    "test_shape_loss": 0.4331365784978481,
+    "test_class_loss": 2.478606024408727,
+    "test_epoch_time": 2640.021188020706,
+    "test_SQ": 0.0,
+    "test_RQ": 0.0,
+    "test_PQ": 0.0
+}

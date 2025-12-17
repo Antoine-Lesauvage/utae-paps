@@ -17,6 +17,7 @@ from src import model_utils
 from src.dataset import PASTIS_Dataset
 from src.panoptic.metrics import PanopticMeter
 from src.panoptic.paps_loss import PaPsLoss
+from src.panoptic.FocalLoss import FocalLoss
 from src.utils import pad_collate, VINE_ORCHARD_CLASS_MAPPING
 
 def load_model_config(model_path):
@@ -107,13 +108,11 @@ def test_single_fold(fold, model_path, dataset_folder, device='cuda'):
         void_label=config.void_label
     )
     
-    criterion = PaPsLoss(
-        l_center=config.l_center,
-        l_size=config.l_size,
-        l_shape=config.l_shape,
-        l_class=config.l_class,
-        beta=config.beta,
-        void_label=config.void_label,
+    criterion = FocalLoss(
+        gamma=config.focal_gamma,
+        alpha=config.focal_alpha,
+        ignore_label=config.ignore_index,
+        void_label=config.void_label
     )
     
     # Test
